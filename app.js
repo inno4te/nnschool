@@ -10,6 +10,31 @@
 const ADMIN_USERNAME = 'forteh';
 const ADMIN_PASSWORD = 'f0rteh';
 
+/* ---------- PASSWORD HASHING ----------
+   Uses SubtleCrypto SHA-256 with a per-school salt. Not bank-grade
+   (localStorage is readable by anyone with access to the device anyway),
+   but prevents casual exposure of plaintext passwords in JSON exports
+   or via dev tools. Returns a hex string. */
+const PWD_SALT = 'ngochi-ndezo-school-of-champions-v1';
+
+async function hashPassword(plain){
+  if(typeof crypto !== 'undefined' && crypto.subtle && crypto.subtle.digest){
+    try {
+      const data = new TextEncoder().encode(PWD_SALT + ':' + String(plain||''));
+      const buf = await crypto.subtle.digest('SHA-256', data);
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+    } catch(e){ /* fall through */ }
+  }
+  // Fallback: deterministic non-cryptographic mixing. Better than plaintext.
+  let s = PWD_SALT + ':' + String(plain||'');
+  let h1 = 0x811c9dc5, h2 = 0xc59d1c81;
+  for(let i = 0; i < s.length; i++){
+    h1 ^= s.charCodeAt(i); h1 = (h1 * 0x01000193) >>> 0;
+    h2 = ((h2 << 5) - h2 + s.charCodeAt(i)) >>> 0;
+  }
+  return ('00000000' + h1.toString(16)).slice(-8) + ('00000000' + h2.toString(16)).slice(-8) + 'fallback';
+}
+
 /* ---------- STATE ---------- */
 const STORAGE_KEY = 'ndezo_state_v1';
 const ROSTER_KEY = 'ndezo_roster_v1';
@@ -69,9 +94,14 @@ function syncToRoster(){
   const id = studentIdFromEmail(STATE.user.email);
   if(!id) return;
   const prev = ROSTER[id] || { notes:{ general:'', perModule:{} } };
+  // Preserve passwordHash: STATE wins if set, otherwise carry over from existing roster record
+  const userOut = { ...STATE.user };
+  if(!userOut.passwordHash && prev.user && prev.user.passwordHash){
+    userOut.passwordHash = prev.user.passwordHash;
+  }
   ROSTER[id] = {
     studentId: id,
-    user: { ...STATE.user },
+    user: userOut,
     modules: JSON.parse(JSON.stringify(STATE.modules || {})),
     diploma: STATE.diploma ? { ...STATE.diploma } : null,
     notes: prev.notes || { general:'', perModule:{} },
@@ -177,7 +207,8 @@ function topbar(){
       <button data-nav="curriculum" class="${STATE.view==='curriculum'?'active':''}">${t('navCurriculum')}</button>
       <button data-nav="founder" class="${STATE.view==='founder'?'active':''}">${t('navFounder')}</button>
     `;
-    right = `<button data-action="signin" class="active">${t('navSignIn')}</button>`;
+    right = `<button data-action="signin">${t('navSignIn')}</button>
+             <button data-action="register" class="active">${t('navRegister')}</button>`;
   }
 
   return `
@@ -1109,9 +1140,10 @@ function importStudentRecord(parsed){
   throw new Error(t('adminImportBadFormat'));
 }
 
-function seedDemoStudents(){
+async function seedDemoStudents(){
   const now = Date.now();
   const day = 86400000;
+  const demoPasswordHash = await hashPassword('demo'); // common password "demo" for all sample students
   const seedData = [
     {
       name: 'Aminata Okafor', email: 'aminata.okafor@example.com', country: 'Nigeria',
@@ -1154,7 +1186,7 @@ function seedDemoStudents(){
     }
     ROSTER[sid] = {
       studentId: sid,
-      user: { name: d.name, email: d.email, country: d.country, enrolledAt: d.enrolledAt },
+      user: { name: d.name, email: d.email, country: d.country, enrolledAt: d.enrolledAt, passwordHash: demoPasswordHash },
       modules,
       diploma: d.hasDiploma ? { issued:true, id:`NSC-DIPLOMA-DEMO-${Math.random().toString(36).slice(2,6).toUpperCase()}`, date: d.lastActivity } : null,
       notes: { general: d.generalNote, perModule: {} },
@@ -1167,40 +1199,81 @@ function seedDemoStudents(){
 
 /* ---------- SIGN-IN MODAL ---------- */
 function signinModal(){
-  const tab = STATE.modalTab || 'enroll';
+  const tab = STATE.modalTab || 'signin';
+  const tabBtn = (id, label) => `<button data-modal-tab="${id}" style="flex:1;padding:18px 12px;border:none;background:${tab===id?'transparent':'rgba(0,0,0,.04)'};color:${tab===id?'var(--emerald-deep)':'var(--ink-soft)'};font-family:var(--body);font-size:11px;letter-spacing:.22em;text-transform:uppercase;font-weight:${tab===id?'700':'500'};border-bottom:2px solid ${tab===id?'var(--gold)':'transparent'};cursor:pointer">${label}</button>`;
+  let pane = '';
+  if(tab === 'signin') pane = signinPane();
+  else if(tab === 'register') pane = enrollPane();
+  else if(tab === 'admin') pane = adminPane();
   return `
-    <div id="modal" style="position:fixed;inset:0;background:rgba(7,42,30,.78);display:flex;align-items:center;justify-content:center;z-index:1000;padding:24px">
-      <div class="card parchment" style="max-width:540px;width:100%;padding:0;position:relative;overflow:hidden">
+    <div id="modal" style="position:fixed;inset:0;background:rgba(7,42,30,.78);display:flex;align-items:center;justify-content:center;z-index:1000;padding:24px;overflow-y:auto">
+      <div class="card parchment" style="max-width:540px;width:100%;padding:0;position:relative;overflow:hidden;margin:auto">
         <button data-action="close-modal" style="position:absolute;top:14px;right:14px;background:none;border:none;font-size:20px;color:var(--ink-soft);cursor:pointer;z-index:2">×</button>
         <div style="display:flex;border-bottom:1px solid var(--rule);background:rgba(255,255,255,.4)">
-          <button data-modal-tab="enroll" style="flex:1;padding:18px;border:none;background:${tab==='enroll'?'transparent':'rgba(0,0,0,.04)'};color:${tab==='enroll'?'var(--emerald-deep)':'var(--ink-soft)'};font-family:var(--body);font-size:11.5px;letter-spacing:.24em;text-transform:uppercase;font-weight:${tab==='enroll'?'700':'500'};border-bottom:2px solid ${tab==='enroll'?'var(--gold)':'transparent'};cursor:pointer">${t('modalTabEnroll')}</button>
-          <button data-modal-tab="admin" style="flex:1;padding:18px;border:none;background:${tab==='admin'?'transparent':'rgba(0,0,0,.04)'};color:${tab==='admin'?'var(--emerald-deep)':'var(--ink-soft)'};font-family:var(--body);font-size:11.5px;letter-spacing:.24em;text-transform:uppercase;font-weight:${tab==='admin'?'700':'500'};border-bottom:2px solid ${tab==='admin'?'var(--gold)':'transparent'};cursor:pointer">${t('modalTabAdmin')}</button>
+          ${tabBtn('signin', t('modalTabSignIn'))}
+          ${tabBtn('register', t('modalTabEnroll'))}
+          ${tabBtn('admin', t('modalTabAdmin'))}
         </div>
         <div style="padding:38px 44px 40px">
-          ${tab === 'enroll' ? enrollPane() : adminPane()}
+          ${pane}
         </div>
       </div>
     </div>
   `;
 }
 
+function signinPane(){
+  const err = STATE.signinError ? `<div style="margin-bottom:14px;padding:10px 14px;background:rgba(159,53,46,.1);border-left:3px solid var(--crimson);color:var(--crimson);font-size:13.5px;font-family:var(--serif)">${escapeHTML(t(STATE.signinError))}</div>` : '';
+  return `
+    <div style="font-size:11px;letter-spacing:.32em;text-transform:uppercase;color:var(--gold-deep);font-weight:600">${t('signinEyebrow')}</div>
+    <h3 style="font-family:var(--display);font-style:italic;font-weight:400;font-size:36px;color:var(--ink);margin:8px 0 14px">${t('signinTitle')}</h3>
+    <p style="font-family:var(--serif);font-size:15px;line-height:1.7;color:var(--ink-soft);margin-bottom:22px">${t('signinIntro')}</p>
+    ${err}
+    <form id="signin-form">
+      <label style="display:block;margin-bottom:14px">
+        <div style="font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--gold-deep);font-weight:600;margin-bottom:6px">${t('enrollEmail')}</div>
+        <input name="email" type="email" autocomplete="email" required style="width:100%;padding:12px 16px;border:1px solid var(--rule);font-family:var(--serif);font-size:16px;background:rgba(255,255,255,.7);color:var(--ink)">
+      </label>
+      <label style="display:block;margin-bottom:20px">
+        <div style="font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--gold-deep);font-weight:600;margin-bottom:6px">${t('signinPasswordLabel')}</div>
+        <input name="password" type="password" autocomplete="current-password" required style="width:100%;padding:12px 16px;border:1px solid var(--rule);font-family:var(--serif);font-size:16px;background:rgba(255,255,255,.7);color:var(--ink)">
+      </label>
+      <button type="submit" class="btn gold" style="width:100%">${t('ctaSignIn')}</button>
+      <div style="margin-top:14px;text-align:center;font-size:13px;color:var(--ink-soft)">
+        ${t('signinNoAccount')} <button type="button" data-modal-tab="register" style="background:none;border:none;color:var(--gold-deep);font-weight:600;cursor:pointer;text-decoration:underline;font-size:13px">${t('signinRegisterHere')}</button>
+      </div>
+    </form>
+  `;
+}
+
 function enrollPane(){
+  const err = STATE.registerError ? `<div style="margin-bottom:14px;padding:10px 14px;background:rgba(159,53,46,.1);border-left:3px solid var(--crimson);color:var(--crimson);font-size:13.5px;font-family:var(--serif)">${escapeHTML(t(STATE.registerError))}</div>` : '';
   return `
     <div style="font-size:11px;letter-spacing:.32em;text-transform:uppercase;color:var(--gold-deep);font-weight:600">${t('enrollEyebrow')}</div>
     <h3 style="font-family:var(--display);font-style:italic;font-weight:400;font-size:36px;color:var(--ink);margin:8px 0 14px">${t('enrollTitle')}</h3>
     <p style="font-family:var(--serif);font-size:15px;line-height:1.7;color:var(--ink-soft);margin-bottom:22px">${t('enrollIntro')}</p>
+    ${err}
     <form id="enroll-form">
-      <label style="display:block;margin-bottom:14px">
+      <label style="display:block;margin-bottom:12px">
         <div style="font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--gold-deep);font-weight:600;margin-bottom:6px">${t('enrollFullName')}</div>
         <input name="name" required style="width:100%;padding:12px 16px;border:1px solid var(--rule);font-family:var(--serif);font-size:16px;background:rgba(255,255,255,.7);color:var(--ink)">
       </label>
-      <label style="display:block;margin-bottom:14px">
+      <label style="display:block;margin-bottom:12px">
         <div style="font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--gold-deep);font-weight:600;margin-bottom:6px">${t('enrollEmail')}</div>
-        <input name="email" type="email" required style="width:100%;padding:12px 16px;border:1px solid var(--rule);font-family:var(--serif);font-size:16px;background:rgba(255,255,255,.7);color:var(--ink)">
+        <input name="email" type="email" autocomplete="email" required style="width:100%;padding:12px 16px;border:1px solid var(--rule);font-family:var(--serif);font-size:16px;background:rgba(255,255,255,.7);color:var(--ink)">
       </label>
-      <label style="display:block;margin-bottom:20px">
+      <label style="display:block;margin-bottom:12px">
         <div style="font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--gold-deep);font-weight:600;margin-bottom:6px">${t('enrollCountry')}</div>
         <input name="country" required style="width:100%;padding:12px 16px;border:1px solid var(--rule);font-family:var(--serif);font-size:16px;background:rgba(255,255,255,.7);color:var(--ink)">
+      </label>
+      <label style="display:block;margin-bottom:12px">
+        <div style="font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--gold-deep);font-weight:600;margin-bottom:6px">${t('enrollPasswordLabel')}</div>
+        <input name="password" type="password" autocomplete="new-password" required minlength="6" style="width:100%;padding:12px 16px;border:1px solid var(--rule);font-family:var(--serif);font-size:16px;background:rgba(255,255,255,.7);color:var(--ink)">
+        <div style="font-size:11.5px;color:var(--ink-soft);margin-top:4px;font-style:italic">${t('enrollPasswordHint')}</div>
+      </label>
+      <label style="display:block;margin-bottom:18px">
+        <div style="font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--gold-deep);font-weight:600;margin-bottom:6px">${t('enrollPasswordConfirm')}</div>
+        <input name="password2" type="password" autocomplete="new-password" required minlength="6" style="width:100%;padding:12px 16px;border:1px solid var(--rule);font-family:var(--serif);font-size:16px;background:rgba(255,255,255,.7);color:var(--ink)">
       </label>
       <label style="display:flex;gap:10px;align-items:flex-start;margin-bottom:22px;font-size:13.5px;line-height:1.55;color:var(--ink-soft)">
         <input type="checkbox" required style="margin-top:4px;flex-shrink:0;accent-color:var(--emerald)">
@@ -1208,6 +1281,9 @@ function enrollPane(){
       </label>
       <button type="submit" class="btn gold" style="width:100%">${t('ctaCommitEnroll')}</button>
       <div style="margin-top:14px;font-size:12px;color:var(--ink-soft);text-align:center;font-style:italic">${t('enrollFreeNote')}</div>
+      <div style="margin-top:14px;text-align:center;font-size:13px;color:var(--ink-soft)">
+        ${t('signinHaveAccount')} <button type="button" data-modal-tab="signin" style="background:none;border:none;color:var(--gold-deep);font-weight:600;cursor:pointer;text-decoration:underline;font-size:13px">${t('signinSignInHere')}</button>
+      </div>
     </form>
   `;
 }
@@ -1274,7 +1350,7 @@ function attach(){
     el.addEventListener('click', () => {
       const n = parseInt(el.dataset.mod, 10);
       if(STATE.adminMode){ return; /* admin uses data-admin-mod */ }
-      if(!STATE.enrolled){ STATE.modal='signin'; STATE.modalTab='enroll'; render(); return; }
+      if(!STATE.enrolled){ STATE.modal='signin'; STATE.modalTab='signin'; render(); return; }
       if(!isModuleUnlocked(n)) return;
       STATE.currentTab = 'teaching';
       navigate('module', { module:n });
@@ -1293,6 +1369,8 @@ function attach(){
     el.addEventListener('click', () => {
       STATE.modalTab = el.dataset.modalTab;
       STATE.adminError = false;
+      STATE.signinError = null;
+      STATE.registerError = null;
       render();
     });
   });
@@ -1305,8 +1383,9 @@ function attach(){
   document.querySelectorAll('[data-action]').forEach(el => {
     el.addEventListener('click', (e) => {
       const a = el.dataset.action;
-      if(a === 'signin' || a === 'enroll'){ STATE.modal='signin'; STATE.modalTab = (a==='signin'?(STATE.modalTab||'enroll'):'enroll'); STATE.adminError=false; render(); }
-      else if(a === 'close-modal'){ STATE.modal=null; STATE.adminError=false; render(); }
+      if(a === 'signin'){ STATE.modal='signin'; STATE.modalTab='signin'; STATE.adminError=false; STATE.signinError=null; STATE.registerError=null; render(); }
+      else if(a === 'register' || a === 'enroll'){ STATE.modal='signin'; STATE.modalTab='register'; STATE.adminError=false; STATE.signinError=null; STATE.registerError=null; render(); }
+      else if(a === 'close-modal'){ STATE.modal=null; STATE.adminError=false; STATE.signinError=null; STATE.registerError=null; render(); }
       else if(a === 'signout'){
         if(confirm(t('confirmSignOut'))){
           STATE = defaultState();
@@ -1345,23 +1424,75 @@ function attach(){
           navigate('admin');
         }
       }
-      else if(a === 'admin-seed-demo'){ seedDemoStudents(); render(); }
+      else if(a === 'admin-seed-demo'){ seedDemoStudents().then(render); }
     });
   });
-  // enrol form
+  // enrol / register form
   const f = document.getElementById('enroll-form');
   if(f){
-    f.addEventListener('submit', (e) => {
+    f.addEventListener('submit', async (e) => {
       e.preventDefault();
       const fd = new FormData(f);
-      STATE.user = {
-        name: (fd.get('name')||'').toString().trim(),
-        email: (fd.get('email')||'').toString().trim(),
-        country: (fd.get('country')||'').toString().trim(),
-        enrolledAt: Date.now()
-      };
+      const name = (fd.get('name')||'').toString().trim();
+      const email = (fd.get('email')||'').toString().trim();
+      const country = (fd.get('country')||'').toString().trim();
+      const pwd = (fd.get('password')||'').toString();
+      const pwd2 = (fd.get('password2')||'').toString();
+
+      // Validation
+      if(pwd.length < 6){ STATE.registerError = 'errPasswordTooShort'; render(); return; }
+      if(pwd !== pwd2){ STATE.registerError = 'errPasswordMismatch'; render(); return; }
+      const sid = studentIdFromEmail(email);
+      if(ROSTER[sid] && ROSTER[sid].user && ROSTER[sid].user.passwordHash){
+        STATE.registerError = 'errEmailExists';
+        render();
+        return;
+      }
+
+      // Hash and register
+      const passwordHash = await hashPassword(pwd);
+      STATE.user = { name, email, country, enrolledAt: Date.now(), passwordHash };
       STATE.enrolled = true;
       STATE.modal = null;
+      STATE.modalTab = null;
+      STATE.registerError = null;
+      STATE.view = 'dashboard';
+      STATE.modules = {};
+      STATE.diploma = null;
+      saveState();
+      syncToRoster();
+      render();
+    });
+  }
+  // student sign-in form
+  const sf = document.getElementById('signin-form');
+  if(sf){
+    sf.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(sf);
+      const email = (fd.get('email')||'').toString().trim();
+      const pwd = (fd.get('password')||'').toString();
+      const sid = studentIdFromEmail(email);
+      const rec = ROSTER[sid];
+      if(!rec || !rec.user || !rec.user.passwordHash){
+        STATE.signinError = 'errNoSuchAccount';
+        render();
+        return;
+      }
+      const candidate = await hashPassword(pwd);
+      if(candidate !== rec.user.passwordHash){
+        STATE.signinError = 'errBadPassword';
+        render();
+        return;
+      }
+      // Restore state from roster record
+      STATE.user = { ...rec.user };
+      STATE.modules = JSON.parse(JSON.stringify(rec.modules || {}));
+      STATE.diploma = rec.diploma ? { ...rec.diploma } : null;
+      STATE.enrolled = true;
+      STATE.modal = null;
+      STATE.modalTab = null;
+      STATE.signinError = null;
       STATE.view = 'dashboard';
       saveState();
       syncToRoster();
